@@ -1,0 +1,167 @@
+//@version=5
+strategy("Swing Trend Baseline", overlay=true, 
+         initial_capital=500, default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100, commission_type=strategy.commission.percent, 
+         commission_value=0.04, slippage=5)
+
+// ============================================================================
+// PARAMETERS
+// ============================================================================
+emaFast = input.int(9, "EMA Fast", minval=1)
+emaSlow = input.int(21, "EMA Slow", minval=1)
+rsiLength = input.int(14, "RSI Length", minval=1)
+rsiLongThreshold = input.int(50, "RSI Long Threshold", minval=0, maxval=100)
+rsiShortThreshold = input.int(50, "RSI Short Threshold", minval=0, maxval=100)
+lookback = input.int(40, "Breakout Lookback", minval=10)
+atrLength = input.int(14, "ATR Length", minval=1)
+rrRatio = input.float(2.5, "Risk/Reward Ratio", minval=1.0, step=0.1)
+riskPercent = input.float(2.0, "Risk Per Trade (%)", minval=0.1, maxval=10.0, step=0.1)
+
+// ============================================================================
+// INDICATORS
+// ============================================================================
+ema_fast = ta.ema(close, emaFast)
+ema_slow = ta.ema(close, emaSlow)
+rsi = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLength)
+
+// Breakout levels
+highest_high = ta.highest(high, lookback)
+lowest_low = ta.lowest(low, lookback)
+
+// Trend conditions
+uptrend = ema_fast > ema_slow
+downtrend = ema_fast < ema_slow
+
+// ============================================================================
+// SIGNALS
+// ============================================================================
+// LONG: Uptrend + RSI > 50 + Close breaks above recent high
+longCondition = uptrend and rsi > rsiLongThreshold and close > highest_high[1]
+
+// SHORT: Downtrend + RSI < 50 + Close breaks below recent low
+shortCondition = downtrend and rsi < rsiShortThreshold and close < lowest_low[1]
+
+// ============================================================================
+// POSITION SIZING & RISK MANAGEMENT
+// ============================================================================
+// Calculate position size based on 2% risk
+calcPositionSize(entryPrice, stopPrice) =>
+    equity = strategy.equity
+    riskAmount = equity * (riskPercent / 100)
+    stopDistance = math.abs(entryPrice - stopPrice)
+    qty = riskAmount / stopDistance
+    qty
+
+// ============================================================================
+// ENTRY & EXIT LOGIC
+// ============================================================================
+if (longCondition and strategy.position_size == 0)
+    entryPrice = close
+    stopLoss = entryPrice - atr * 1.5  // SL = Entry - 1.5 ATR
+    takeProfit = entryPrice + (entryPrice - stopLoss) * rrRatio  // TP = Entry + (Entry-SL) * 2.5
+    
+    // Position size calculation
+    qty = calcPositionSize(entryPrice, stopLoss)
+    
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Long Exit", "Long", stop=stopLoss, limit=takeProfit)
+    
+    // Visual markers
+    label.new(bar_index, low, "🟢 LONG\nEntry: " + str.tostring(entryPrice, "#.##") + 
+              "\nSL: " + str.tostring(stopLoss, "#.##") + 
+              "\nTP: " + str.tostring(takeProfit, "#.##"),
+              style=label.style_label_up, color=color.new(color.green, 20), 
+              textcolor=color.white, size=size.small)
+
+if (shortCondition and strategy.position_size == 0)
+    entryPrice = close
+    stopLoss = entryPrice + atr * 1.5  // SL = Entry + 1.5 ATR
+    takeProfit = entryPrice - (stopLoss - entryPrice) * rrRatio  // TP = Entry - (SL-Entry) * 2.5
+    
+    // Position size calculation
+    qty = calcPositionSize(entryPrice, stopLoss)
+    
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Short Exit", "Short", stop=stopLoss, limit=takeProfit)
+    
+    // Visual markers
+    label.new(bar_index, high, "🔴 SHORT\nEntry: " + str.tostring(entryPrice, "#.##") + 
+              "\nSL: " + str.tostring(stopLoss, "#.##") + 
+              "\nTP: " + str.tostring(takeProfit, "#.##"),
+              style=label.style_label_down, color=color.new(color.red, 20), 
+              textcolor=color.white, size=size.small)
+
+// ============================================================================
+// DAILY LOSS LIMIT (Safety Circuit Breaker)
+// ============================================================================
+var float dailyPnL = 0.0
+var int lastDay = 0
+
+// Reset daily P&L at start of new day
+if (dayofmonth != lastDay)
+    dailyPnL := 0.0
+    lastDay := dayofmonth
+
+// Track P&L
+if (strategy.closedtrades > 0)
+    dailyPnL += strategy.netprofit - strategy.netprofit[1]
+
+// Close all positions if daily loss limit hit (-6%)
+if (dailyPnL <= -500 * 0.06)  // -$30 on $500 capital
+    strategy.close_all("Daily Loss Limit")
+    label.new(bar_index, high, "⛔ DAILY STOP", 
+              style=label.style_label_down, color=color.new(color.orange, 0), 
+              textcolor=color.white, size=size.normal)
+
+// ============================================================================
+// VISUAL PLOTS
+// ============================================================================
+plot(ema_fast, "EMA Fast", color=color.new(color.blue, 0), linewidth=2)
+plot(ema_slow, "EMA Slow", color=color.new(color.red, 0), linewidth=2)
+plot(highest_high, "Resistance", color=color.new(color.green, 70), style=plot.style_line)
+plot(lowest_low, "Support", color=color.new(color.red, 70), style=plot.style_line)
+
+// RSI plot (separate pane)
+hline(rsiLongThreshold, "RSI Long Threshold", color=color.new(color.green, 50))
+hline(rsiShortThreshold, "RSI Short Threshold", color=color.new(color.red, 50))
+
+// Background colors for trend
+bgcolor(uptrend ? color.new(color.green, 95) : na, title="Uptrend Background")
+bgcolor(downtrend ? color.new(color.red, 95) : na, title="Downtrend Background")
+
+// ============================================================================
+// PERFORMANCE TABLE (Optional - enable for detailed stats)
+// ============================================================================
+if (barstate.islast)
+    var table perfTable = table.new(position.top_right, 2, 8, border_width=1)
+    
+    table.cell(perfTable, 0, 0, "Metric", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(perfTable, 1, 0, "Value", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    
+    table.cell(perfTable, 0, 1, "Net Profit")
+    table.cell(perfTable, 1, 1, str.tostring(strategy.netprofit, "#.##") + " USD", 
+               text_color=strategy.netprofit > 0 ? color.green : color.red)
+    
+    table.cell(perfTable, 0, 2, "Win Rate")
+    winRate = strategy.wintrades / strategy.closedtrades * 100
+    table.cell(perfTable, 1, 2, str.tostring(winRate, "#.##") + "%", 
+               text_color=winRate > 50 ? color.green : color.red)
+    
+    table.cell(perfTable, 0, 3, "Total Trades")
+    table.cell(perfTable, 1, 3, str.tostring(strategy.closedtrades))
+    
+    table.cell(perfTable, 0, 4, "Profit Factor")
+    profitFactor = strategy.grossprofit / math.abs(strategy.grossloss)
+    table.cell(perfTable, 1, 4, str.tostring(profitFactor, "#.##"), 
+               text_color=profitFactor > 1.5 ? color.green : color.red)
+    
+    table.cell(perfTable, 0, 5, "Max Drawdown")
+    table.cell(perfTable, 1, 5, str.tostring(strategy.max_drawdown, "#.##") + " USD", 
+               text_color=color.red)
+    
+    table.cell(perfTable, 0, 6, "Avg Win")
+    table.cell(perfTable, 1, 6, str.tostring(strategy.grossprofit / strategy.wintrades, "#.##") + " USD")
+    
+    table.cell(perfTable, 0, 7, "Avg Loss")
+    table.cell(perfTable, 1, 7, str.tostring(strategy.grossloss / strategy.losstrades, "#.##") + " USD")
