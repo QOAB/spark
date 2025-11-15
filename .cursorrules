@@ -1,0 +1,429 @@
+# AI Codex Instructions for Spark Trading Bot
+
+## Project Overview
+
+**Spark** is a Phase 0 paper trading bot for cryptocurrency trading on Binance Testnet. The system validates a **Swing Trend Baseline** strategy during a 2-week testing period before live trading begins on December 1, 2025.
+
+**Tech Stack:**
+- Python 3.11+
+- FastAPI (REST API backend)
+- PostgreSQL 15 + TimescaleDB (time-series data)
+- Redis 7 (caching)
+- Telegram Bot (user interface)
+- Docker Compose (orchestration)
+- ccxt 4.1.47 (Binance API integration)
+- TA-Lib 0.4.28 (technical indicators)
+
+**Strategy:**
+- Swing Trend Baseline (EMA 9/21 crossover, RSI 14, 40-bar breakout)
+- Risk: 2% per trade, max 1 position, 6% daily loss limit
+- Risk/Reward: 2.5:1 ratio
+
+---
+
+## Architecture
+
+```
+Telegram Bot (user interface)
+    ↓ HTTP requests
+FastAPI Backend (trading engine)
+    ↓ queries
+PostgreSQL + TimescaleDB (OHLCV data, trades history)
+    ↓ market data
+Binance Testnet API (via ccxt)
+```
+
+**4 Docker services:**
+1. `postgres` - Database with TimescaleDB extension
+2. `redis` - Cache and pub/sub
+3. `backend` - FastAPI REST API (port 8000)
+4. `bot` - Telegram bot
+
+---
+
+## File Structure
+
+```
+spark/
+├── backend/
+│   ├── api/routes.py          # 7 REST endpoints
+│   ├── models/trade.py        # SQLAlchemy Trade model
+│   ├── services/
+│   │   ├── market_data.py     # ccxt wrapper for Binance
+│   │   └── paper_trading.py   # Paper trading simulation engine
+│   ├── strategies/
+│   │   └── swing_trend.py     # Strategy implementation
+│   ├── config.py              # Pydantic settings (25+ params)
+│   ├── database.py            # SQLAlchemy async setup
+│   └── main.py                # FastAPI app entry point
+├── bot/
+│   ├── main.py                # Telegram bot (8 commands)
+│   └── config.py              # Bot settings
+├── migrations/
+│   └── 001_initial.sql        # PostgreSQL schema
+├── backtest/
+│   └── swing_trend_strategy.pine  # TradingView backtest script
+├── docker-compose.yml         # Multi-service orchestration
+└── .env                       # Configuration (not in Git)
+```
+
+---
+
+## AI Coding Guidelines
+
+### 1. **Code Style**
+
+- **Python:** PEP 8, async/await everywhere, type hints mandatory
+- **Docstrings:** Google style for all functions/classes
+- **Error handling:** Always use try/except with specific exceptions
+- **Logging:** Use Python `logging` module (not print statements)
+
+**Example:**
+```python
+async def fetch_ohlcv(
+    self,
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 100
+) -> pd.DataFrame:
+    """
+    Fetch OHLCV data from exchange.
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTC/USDT')
+        timeframe: Candle timeframe (e.g., '1h', '4h')
+        limit: Number of candles to fetch
+    
+    Returns:
+        DataFrame with columns: timestamp, open, high, low, close, volume
+    
+    Raises:
+        Exception: If API request fails
+    """
+    try:
+        ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit)
+        return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    except Exception as e:
+        logger.error(f"Error fetching OHLCV for {symbol}: {e}")
+        raise
+```
+
+### 2. **Database Operations**
+
+- **Always use async sessions:** `AsyncSession` from SQLAlchemy
+- **Use transactions:** Wrap multiple DB operations in try/except with rollback
+- **Indexes:** Ensure high-frequency queries use indexes (symbol, status, opened_at)
+- **TimescaleDB:** Use hypertables for OHLCV data (already configured in migrations/001_initial.sql)
+
+**Example:**
+```python
+async def save_trade(trade: Trade, db: AsyncSession):
+    """Save trade to database with transaction."""
+    try:
+        db.add(trade)
+        await db.commit()
+        await db.refresh(trade)
+        return trade
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Failed to save trade: {e}")
+        raise
+```
+
+### 3. **API Endpoints**
+
+- **RESTful conventions:** GET for reads, POST for writes
+- **Response models:** Use Pydantic models for all responses
+- **Status codes:** 200 (success), 400 (client error), 500 (server error)
+- **Error responses:** Always return `{"error": "message"}` format
+
+**Example:**
+```python
+@router.get("/api/v1/status", response_model=StatusResponse)
+async def get_status(db: AsyncSession = Depends(get_db)):
+    """Get portfolio status."""
+    try:
+        # ... logic
+        return StatusResponse(equity=equity, positions=positions)
+    except Exception as e:
+        logger.error(f"Status endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+### 4. **Risk Management Rules**
+
+**CRITICAL - Never violate these:**
+- Max 1 open position at a time (`MAX_OPEN_POSITIONS=1`)
+- Risk exactly 2% per trade (`RISK_PER_TRADE=2.0`)
+- Stop trading if daily loss reaches 6% (`DAILY_LOSS_LIMIT=6.0`)
+- Position size formula: `risk_amount / abs(entry_price - stop_loss)`
+- Always set stop loss at `entry ± 2*ATR`
+- Always set take profit at `entry ± 2.5*stop_distance`
+
+**Example:**
+```python
+def calculate_position_size(self, entry_price: float, stop_price: float) -> float:
+    """Calculate position size based on 2% risk."""
+    risk_amount = self.equity * (settings.RISK_PER_TRADE / 100.0)
+    stop_distance = abs(entry_price - stop_price)
+    
+    if stop_distance == 0:
+        return 0.0
+    
+    qty = risk_amount / stop_distance
+    
+    # Ensure we don't exceed available capital
+    position_cost = qty * entry_price
+    if position_cost > self.available:
+        qty = self.available / entry_price
+    
+    return qty
+```
+
+### 5. **Strategy Implementation**
+
+When modifying `backend/strategies/swing_trend.py`:
+
+- **Indicators:** Use TA-Lib functions (EMA, RSI, ATR, etc.)
+- **Signal logic:** Long = uptrend + RSI > 50 + breakout above highest high
+- **Signal logic:** Short = downtrend + RSI < 50 + breakout below lowest low
+- **Lookback period:** 40 bars for highest/lowest calculation
+- **Always validate:** Check for NaN/None values before generating signals
+
+**Example:**
+```python
+def generate_signal(self, df: pd.DataFrame) -> Optional[Dict]:
+    """Generate trading signal."""
+    if 'ema_fast' not in df.columns:
+        df = self.calculate_indicators(df)
+    
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+    
+    # Check for missing data
+    if pd.isna(latest['ema_fast']) or pd.isna(latest['rsi']) or pd.isna(latest['atr']):
+        return None
+    
+    # Long signal
+    if (latest['uptrend'] and 
+        latest['rsi'] > 50 and 
+        latest['close'] > previous['highest_high']):
+        
+        entry_price = latest['close']
+        stop_loss = entry_price - (2 * latest['atr'])
+        take_profit = entry_price + (2.5 * (entry_price - stop_loss))
+        
+        return {
+            'side': 'long',
+            'entry': float(entry_price),
+            'stop': float(stop_loss),
+            'tp': float(take_profit)
+        }
+    
+    return None
+```
+
+### 6. **Telegram Bot Commands**
+
+When adding new commands:
+- **Command format:** `/command [args]`
+- **Error handling:** Catch `httpx.HTTPStatusError` from backend API calls
+- **User feedback:** Always send confirmation message after action
+- **Formatting:** Use emoji for visual clarity (🟢 profit, 🔴 loss, ⚠️ warning)
+
+**Example:**
+```python
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /status command."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_BASE}/status")
+            response.raise_for_status()
+            data = response.json()
+        
+        equity = data['equity']
+        pnl = data['today_pnl']
+        emoji = "🟢" if pnl >= 0 else "🔴"
+        
+        message = f"{emoji} Portfolio Status\n\n"
+        message += f"Equity: ${equity:.2f}\n"
+        message += f"Today's P&L: ${pnl:.2f}\n"
+        
+        await update.message.reply_text(message)
+    
+    except httpx.HTTPStatusError as e:
+        await update.message.reply_text(f"⚠️ API error: {e}")
+    except Exception as e:
+        logger.error(f"Status command error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+```
+
+### 7. **Testing**
+
+- **Manual testing:** Use Swagger UI at `http://localhost:8000/docs`
+- **Database checks:** Use `docker-compose exec postgres psql -U postgres -d trading_bot`
+- **Logs:** Check with `docker-compose logs -f backend` or `docker-compose logs -f bot`
+- **Testnet:** Always use Binance Testnet (`EXCHANGE_TESTNET=true` in .env)
+
+### 8. **Configuration**
+
+- **Never hardcode values:** All parameters in `backend/config.py`
+- **Environment variables:** Load from `.env` file via Pydantic Settings
+- **Sensitive data:** Never commit API keys (`.gitignore` already configured)
+- **Defaults:** Provide sensible defaults in config.py
+
+**Example:**
+```python
+class Settings(BaseSettings):
+    EXCHANGE_API_KEY: str = Field(..., env="EXCHANGE_API_KEY")
+    EXCHANGE_API_SECRET: str = Field(..., env="EXCHANGE_API_SECRET")
+    INITIAL_CAPITAL: float = Field(500.0, env="INITIAL_CAPITAL")
+    RISK_PER_TRADE: float = Field(2.0, env="RISK_PER_TRADE")
+    
+    class Config:
+        env_file = ".env"
+```
+
+---
+
+## Common Tasks
+
+### Add new REST endpoint
+
+1. Define route in `backend/api/routes.py`
+2. Create Pydantic response model
+3. Add database query if needed
+4. Test via Swagger UI (`/docs`)
+5. Update README.md API section
+
+### Add new Telegram command
+
+1. Define command handler in `bot/main.py`
+2. Register in `application.add_handler()`
+3. Add to help text in `help_command()`
+4. Test in Telegram
+
+### Modify strategy logic
+
+1. Edit `backend/strategies/swing_trend.py`
+2. Update indicator calculations if needed
+3. Test signal generation with historical data
+4. Update TradingView script (`backtest/swing_trend_strategy.pine`) to match
+
+### Add new database table
+
+1. Create migration file in `migrations/` (e.g., `002_new_table.sql`)
+2. Create SQLAlchemy model in `backend/models/`
+3. Run migration: `docker-compose exec postgres psql -U postgres -d trading_bot -f /docker-entrypoint-initdb.d/002_new_table.sql`
+
+---
+
+## When Making Changes
+
+### Before editing code:
+1. **Read relevant files** (use grep_search or read_file tools)
+2. **Understand context** (check imports, dependencies)
+3. **Check existing patterns** (match code style)
+
+### When writing code:
+1. **Follow existing structure** (don't reinvent patterns)
+2. **Add docstrings** (explain what, why, not just how)
+3. **Handle errors** (never silently fail)
+4. **Log important events** (use logger, not print)
+
+### After editing code:
+1. **Test manually** (run Docker, check logs)
+2. **Verify API** (use Swagger UI)
+3. **Check database** (query tables to verify data)
+4. **Update docs** (if behavior changed)
+
+---
+
+## Phase 0 Success Criteria
+
+The bot must pass these criteria after 2-week paper trading:
+
+- ✅ Net Profit > $0
+- ✅ Win Rate > 50%
+- ✅ Profit Factor > 1.2
+- ✅ Max Drawdown < 10%
+- ✅ Total Trades ≥ 10
+
+**If any criteria fails:** Optimize strategy parameters or abort live trading.
+
+---
+
+## Security Rules
+
+- **Never expose API keys** (already in `.gitignore`)
+- **Testnet only** for Phase 0 (`EXCHANGE_TESTNET=true`)
+- **Disable withdrawals** (API key permissions on Binance Testnet)
+- **IP restrictions** (configure on Binance account)
+- **Rate limiting** (ccxt already has `enableRateLimit=True`)
+
+---
+
+## Useful Commands
+
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f backend
+docker-compose logs -f bot
+
+# Check service status
+docker-compose ps
+
+# Restart service
+docker-compose restart backend
+
+# Rebuild after code changes
+docker-compose up -d --build backend
+
+# Database access
+docker-compose exec postgres psql -U postgres -d trading_bot
+
+# Redis access
+docker-compose exec redis redis-cli
+
+# Stop all services
+docker-compose down
+
+# Full cleanup (WARNING: deletes data)
+docker-compose down -v
+```
+
+---
+
+## Resources
+
+- **Repository:** https://github.com/QOAB/spark
+- **FastAPI docs:** https://fastapi.tiangolo.com/
+- **ccxt docs:** https://docs.ccxt.com/
+- **TA-Lib docs:** https://ta-lib.github.io/ta-lib-python/
+- **SQLAlchemy async:** https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html
+- **Telegram Bot API:** https://python-telegram-bot.org/
+
+---
+
+## Important Notes for AI
+
+- **This is Phase 0:** Paper trading only, no real money
+- **Target date:** Live trading starts December 1, 2025 (if Phase 0 passes)
+- **User commitment:** 2-3 hours setup, 30 min/day monitoring
+- **Trade frequency:** ~1-2 trades/week (swing trading, not day trading)
+- **Symbol:** Focus on BTC/USDT (can expand later)
+- **Timeframe:** 1 hour candles (configurable)
+
+**When in doubt:**
+- Prioritize **safety** over speed
+- Follow **existing patterns** over new approaches
+- **Ask questions** rather than assume
+- **Test thoroughly** before pushing to production
+
+---
+
+**Last updated:** November 16, 2025
+**Project status:** Phase 0 - Paper Trading Validation
