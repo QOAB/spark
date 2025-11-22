@@ -345,8 +345,12 @@ async def get_system_info(db: AsyncSession = Depends(get_db)):
         # Portfolio status
         portfolio = paper_engine.get_status()
         
-        # Database statistics
-        result = await db.execute(select(Trade))
+        # Database statistics - limit to last 1000 trades for performance
+        result = await db.execute(
+            select(Trade)
+            .order_by(desc(Trade.opened_at))
+            .limit(1000)
+        )
         all_trades = result.scalars().all()
         
         closed_trades = [t for t in all_trades if t.status == "closed"]
@@ -367,13 +371,17 @@ async def get_system_info(db: AsyncSession = Depends(get_db)):
         gross_loss = abs(sum(t.pnl for t in losing_trades))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
         
-        # Exchange status
+        # Exchange status - handle specific exceptions
         try:
             ticker = await market_data.get_ticker("BTCUSDT")
             exchange_status = "connected"
             exchange_last_price = ticker.get("last", 0)
-        except Exception:
+        except (ConnectionError, TimeoutError) as e:
             exchange_status = "disconnected"
+            exchange_last_price = 0
+        except Exception as e:
+            # Log unexpected errors but don't fail the endpoint
+            exchange_status = "error"
             exchange_last_price = 0
         
         return {
