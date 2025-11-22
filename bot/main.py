@@ -38,6 +38,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/positions - Показать открытые позиции\n"
         "/update <SYMBOL> - Обновить позиции (проверить SL/TP)\n"
         "/history - Показать историю сделок\n"
+        "/system - Показать информацию о системе\n"
         "/help - Показать помощь\n\n"
         "⚠️ *ВНИМАНИЕ:* Это paper trading (тестовый режим)!\n"
         "Реальные деньги не используются."
@@ -71,6 +72,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Обновляет позиции (проверяет SL/TP hits)\n\n"
         "*6️⃣ /history*\n"
         "Показывает последние 20 закрытых сделок\n\n"
+        "*7️⃣ /system*\n"
+        "Показывает полную информацию о системе:\n"
+        "• Конфигурация и параметры\n"
+        "• Статистика торговли\n"
+        "• Состояние биржи и базы данных\n\n"
         "*⚙️ Параметры стратегии:*\n"
         f"• Timeframe: {settings.TIMEFRAME}\n"
         f"• Risk per trade: {settings.RISK_PER_TRADE}%\n"
@@ -342,6 +348,77 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 
+async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /system command - show comprehensive system information."""
+    try:
+        processing_msg = await update.message.reply_text("⏳ Загрузка информации о системе...")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_BASE}/system-info", timeout=15.0)
+            response.raise_for_status()
+            data = response.json()
+        
+        # Build comprehensive message
+        message = (
+            f"🤖 *{data['system']['name']}*\n"
+            f"📌 {data['system']['phase']}\n"
+            f"🔖 Version: {data['system']['version']}\n\n"
+            
+            f"⚙️ *Конфигурация:*\n"
+            f"💰 Initial Capital: ${data['configuration']['initial_capital']:.0f}\n"
+            f"⚠️ Risk per Trade: {data['configuration']['risk_per_trade']}\n"
+            f"📊 Max Positions: {data['configuration']['max_open_positions']}\n"
+            f"🛑 Daily Loss Limit: {data['configuration']['daily_loss_limit']}\n"
+            f"⏰ Timeframe: {data['configuration']['timeframe']}\n\n"
+            
+            f"📈 *Стратегия: {data['strategy']['name']}*\n"
+            f"• EMA Fast/Slow: {data['strategy']['indicators']['ema_fast']}/{data['strategy']['indicators']['ema_slow']}\n"
+            f"• RSI: {data['strategy']['indicators']['rsi_length']}\n"
+            f"• ATR: {data['strategy']['indicators']['atr_length']}\n"
+            f"• Breakout Lookback: {data['strategy']['indicators']['breakout_lookback']}\n"
+            f"• R:R Ratio: {data['strategy']['risk_management']['risk_reward_ratio']}\n\n"
+            
+            f"💼 *Портфель:*\n"
+            f"💰 Equity: ${data['portfolio']['equity']:.2f}\n"
+            f"💵 Available: ${data['portfolio']['available_capital']:.2f}\n"
+            f"📊 Open Positions: {data['portfolio']['open_positions']}\n"
+            f"💸 Total P&L: ${data['portfolio']['total_pnl']:.2f} ({data['portfolio']['pnl_percentage']:.2f}%)\n\n"
+            
+            f"📊 *Статистика:*\n"
+            f"📝 Total Trades: {data['statistics']['total_trades']}\n"
+            f"✅ Closed: {data['statistics']['closed_trades']} | 🔓 Open: {data['statistics']['open_trades']}\n"
+            f"🟢 Wins: {data['statistics']['winning_trades']} | 🔴 Losses: {data['statistics']['losing_trades']}\n"
+            f"🎯 Win Rate: {data['statistics']['win_rate']:.1f}%\n"
+            f"📈 Avg Win: ${data['statistics']['average_win']:.2f}\n"
+            f"📉 Avg Loss: ${data['statistics']['average_loss']:.2f}\n"
+            f"💹 Profit Factor: {data['statistics']['profit_factor']:.2f}\n\n"
+            
+            f"🔗 *Exchange:*\n"
+            f"• {data['exchange']['name']} ({data['exchange']['mode'].upper()})\n"
+            f"• Status: {data['exchange']['status']}\n"
+            f"• API Configured: {'✅' if data['exchange']['api_configured'] else '❌'}\n"
+        )
+        
+        if data['exchange']['btcusdt_price'] > 0:
+            message += f"• BTC/USDT: ${data['exchange']['btcusdt_price']:.2f}\n"
+        
+        message += (
+            f"\n💾 *База данных:*\n"
+            f"• {data['database']['connection']}\n"
+            f"• Tables: {len(data['database']['tables'])}\n"
+            f"• Records: {data['database']['total_records']}\n"
+        )
+        
+        await processing_msg.edit_text(message, parse_mode='Markdown')
+        
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error in system_command: {e}")
+        await update.message.reply_text("❌ Ошибка при получении системной информации")
+    except Exception as e:
+        logger.error(f"Error in system_command: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+
 def main():
     """Start the bot."""
     # Create application
@@ -356,6 +433,7 @@ def main():
     application.add_handler(CommandHandler("positions", positions_command))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(CommandHandler("system", system_command))
     
     # Start bot
     logger.info("Starting Telegram bot...")

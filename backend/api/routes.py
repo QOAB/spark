@@ -327,3 +327,143 @@ async def health_check():
         "service": "trading-bot-api",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+@router.get("/system-info")
+async def get_system_info(db: AsyncSession = Depends(get_db)):
+    """
+    Comprehensive system information endpoint.
+    Returns complete inventory of what the system has:
+    - System configuration and parameters
+    - Strategy settings and indicators
+    - Portfolio state and performance
+    - Database statistics
+    - Exchange connection info
+    - Available features
+    """
+    try:
+        # Portfolio status
+        portfolio = paper_engine.get_status()
+        
+        # Database statistics
+        result = await db.execute(select(Trade))
+        all_trades = result.scalars().all()
+        
+        closed_trades = [t for t in all_trades if t.status == "closed"]
+        open_trades = [t for t in all_trades if t.status == "open"]
+        
+        # Calculate statistics
+        total_pnl = sum(t.pnl for t in closed_trades if t.pnl is not None)
+        winning_trades = [t for t in closed_trades if t.pnl and t.pnl > 0]
+        losing_trades = [t for t in closed_trades if t.pnl and t.pnl < 0]
+        win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
+        
+        # Average win/loss
+        avg_win = sum(t.pnl for t in winning_trades) / len(winning_trades) if winning_trades else 0
+        avg_loss = sum(t.pnl for t in losing_trades) / len(losing_trades) if losing_trades else 0
+        
+        # Profit factor
+        gross_profit = sum(t.pnl for t in winning_trades)
+        gross_loss = abs(sum(t.pnl for t in losing_trades))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+        
+        # Exchange status
+        try:
+            ticker = await market_data.get_ticker("BTCUSDT")
+            exchange_status = "connected"
+            exchange_last_price = ticker.get("last", 0)
+        except Exception:
+            exchange_status = "disconnected"
+            exchange_last_price = 0
+        
+        return {
+            "system": {
+                "name": "Swing Trend Trading Bot",
+                "version": "1.0.0",
+                "phase": "Phase 0 - Paper Trading",
+                "timestamp": datetime.utcnow().isoformat()
+            },
+            "configuration": {
+                "initial_capital": settings.INITIAL_CAPITAL,
+                "risk_per_trade": f"{settings.RISK_PER_TRADE}%",
+                "max_open_positions": settings.MAX_OPEN_POSITIONS,
+                "daily_loss_limit": f"{settings.DAILY_LOSS_LIMIT}%",
+                "timeframe": settings.TIMEFRAME,
+                "timezone": settings.TIMEZONE
+            },
+            "strategy": {
+                "name": "Swing Trend Baseline",
+                "indicators": {
+                    "ema_fast": settings.EMA_FAST,
+                    "ema_slow": settings.EMA_SLOW,
+                    "rsi_length": settings.RSI_LENGTH,
+                    "rsi_long_threshold": settings.RSI_LONG_THRESHOLD,
+                    "rsi_short_threshold": settings.RSI_SHORT_THRESHOLD,
+                    "atr_length": settings.ATR_LENGTH,
+                    "breakout_lookback": settings.LOOKBACK
+                },
+                "risk_management": {
+                    "stop_loss": "Entry ± 2*ATR",
+                    "take_profit": f"Entry ± {settings.RR_RATIO}*(Entry-StopLoss)",
+                    "risk_reward_ratio": settings.RR_RATIO
+                }
+            },
+            "portfolio": {
+                "equity": portfolio["equity"],
+                "available_capital": portfolio["available"],
+                "open_positions": len(portfolio["positions"]),
+                "positions_detail": portfolio["positions"],
+                "total_pnl": round(total_pnl, 2),
+                "pnl_percentage": round((total_pnl / settings.INITIAL_CAPITAL) * 100, 2) if settings.INITIAL_CAPITAL > 0 else 0
+            },
+            "statistics": {
+                "total_trades": len(all_trades),
+                "closed_trades": len(closed_trades),
+                "open_trades": len(open_trades),
+                "winning_trades": len(winning_trades),
+                "losing_trades": len(losing_trades),
+                "win_rate": round(win_rate, 2),
+                "average_win": round(avg_win, 2),
+                "average_loss": round(avg_loss, 2),
+                "profit_factor": round(profit_factor, 2),
+                "gross_profit": round(gross_profit, 2),
+                "gross_loss": round(gross_loss, 2)
+            },
+            "exchange": {
+                "name": "Binance",
+                "mode": "testnet" if settings.EXCHANGE_TESTNET else "live",
+                "status": exchange_status,
+                "btcusdt_price": exchange_last_price,
+                "api_configured": bool(settings.EXCHANGE_API_KEY and settings.EXCHANGE_API_SECRET)
+            },
+            "features": {
+                "api_endpoints": [
+                    "GET /api/v1/status - Portfolio status",
+                    "GET /api/v1/signals/{symbol} - Check trading signal",
+                    "POST /api/v1/execute/{symbol} - Open position",
+                    "GET /api/v1/positions - List open positions",
+                    "POST /api/v1/update-positions/{symbol} - Update positions",
+                    "GET /api/v1/trades/history - Trade history",
+                    "GET /api/v1/system-info - System information",
+                    "GET /health - Health check"
+                ],
+                "telegram_commands": [
+                    "/start - Welcome message",
+                    "/help - Command help",
+                    "/status - Portfolio status",
+                    "/signals BTCUSDT - Check signal",
+                    "/execute BTCUSDT - Open position",
+                    "/positions - List positions",
+                    "/update BTCUSDT - Update positions",
+                    "/history - Trade history",
+                    "/system - System information"
+                ]
+            },
+            "database": {
+                "connection": "PostgreSQL + TimescaleDB",
+                "tables": ["trades", "ohlcv", "portfolio_state"],
+                "total_records": len(all_trades)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching system info: {str(e)}")
