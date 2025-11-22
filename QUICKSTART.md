@@ -114,6 +114,7 @@ docker-compose exec postgres psql -U postgres -d trading_bot -c "SELECT COUNT(*)
 /positions          Show all open positions
 /update BTCUSDT     Update positions (check SL/TP)
 /history            Last 20 closed trades
+/system             Complete system information and stats
 ```
 
 ---
